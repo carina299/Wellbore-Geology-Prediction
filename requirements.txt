@@ -12,3 +12,5 @@ fastapi
 uvicorn
 pyyaml
 python-multipart
+boto3
+zipfile
