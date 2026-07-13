@@ -6,20 +6,23 @@ Endpoints
 GET  /health
     Liveness check.
 
-POST /predict
-    body: {
-        "csv_path": "path/to/<well_id>__horizontal_well.csv",   # required
-        "well_id": "optional override, else derived from filename",
-        "type_well_csv": "optional override of config default type well csv"
-    }
+POST /predict   (multipart/form-data)
+    file:            the horizontal well CSV to predict on (required)
+    well_id:         optional override, else derived from the uploaded filename
+    type_well_file:  optional type-well reference CSV (TVT, GR columns);
+                      if omitted, falls back to config.yaml's type_well_csv
     -> { "well": ..., "n_points": ..., "predictions": [ {id, md, pred}, ... ] }
 
-POST /predict_batch
-    body: { "csv_paths": [...], "type_well_csv": "optional" }
+POST /predict_batch   (multipart/form-data)
+    files:           one or more horizontal well CSVs (required, repeat the field)
+    type_well_file:  optional type-well reference CSV, shared across all wells
     -> { "results": [ <same shape as /predict per well>, ... ], "errors": [...] }
 
 Run with:  uvicorn app:app --host 0.0.0.0 --port 8000
 (host/port/reload can also be read from config.yaml if you run this file directly)
+
+Requires `python-multipart` (needed by FastAPI/Starlette to parse file uploads):
+    pip install python-multipart
 
 Notes
 -----
@@ -27,25 +30,27 @@ Notes
   here -- they were already fit at training time and are loaded from disk inside
   WellborePredictor (self.FI / self.DI), via FI_knn.pkl / DI_imputer.pkl. We just
   reuse predictor.FI / predictor.DI when calling build_well().
-- "tw" (type well curve: TVT vs GR reference log) is loaded from a CSV configured
-  in config.yaml (key: type_well_csv), unless overridden per-request. Adjust the
-  key name in config.yaml / this file if your config uses a different name.
+- "tw" (type well curve: TVT vs GR reference log) can be uploaded per-request via
+  type_well_file, or falls back to a CSV configured in config.yaml (key:
+  type_well_csv), loaded once at startup.
 - Feature building + model inference are CPU-bound / synchronous (pandas, numba,
   lightgbm, catboost), so request handlers offload them to a thread pool via
-  run_in_threadpool instead of blocking the event loop.
+  run_in_threadpool instead of blocking the event loop. File uploads are read
+  into memory (bytes) on the async side first, then handed to the threadpool as
+  plain DataFrames -- no disk paths involved.
 """
 
+import io
 import logging
+import sys
 from pathlib import Path
 from typing import List, Optional
 
 import pandas as pd
 import yaml
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel
-
-import sys
 
 from src.features import build_well, FormationPlaneKNN, DenseANCCImputer
 from src.model import WellborePredictor
@@ -86,7 +91,7 @@ def load_config():
 
 CONFIG = load_config()
 
-app = FastAPI(title="Wellbore TVT Predictor", version="1.0.0")
+app = FastAPI(title="Wellbore TVT Predictor", version="2.0.0")
 
 log.info("Loading WellborePredictor (models_dir=%s)...", CONFIG.get("models_dir"))
 predictor = WellborePredictor(models_dir=CONFIG.get("models_dir"))
@@ -105,19 +110,8 @@ if _default_tw_path:
 
 
 # --------------------------------------------------------------------------- #
-# Request / response schemas
+# Response schemas
 # --------------------------------------------------------------------------- #
-
-class PredictRequest(BaseModel):
-    csv_path: str
-    well_id: Optional[str] = None
-    type_well_csv: Optional[str] = None
-
-
-class PredictBatchRequest(BaseModel):
-    csv_paths: List[str]
-    type_well_csv: Optional[str] = None
-
 
 class PredictionPoint(BaseModel):
     id: str
@@ -132,7 +126,7 @@ class PredictResponse(BaseModel):
 
 
 class BatchError(BaseModel):
-    csv_path: str
+    filename: str
     error: str
 
 
@@ -142,36 +136,17 @@ class PredictBatchResponse(BaseModel):
 
 
 # --------------------------------------------------------------------------- #
-# Core logic (sync, runs in threadpool)
+# Core logic (sync, runs in threadpool) -- operates on DataFrames only, no I/O
 # --------------------------------------------------------------------------- #
 
-def _load_type_well(type_well_csv):
-    if type_well_csv:
-        p = Path(type_well_csv)
-        if not p.exists():
-            raise FileNotFoundError(f"type_well_csv not found: {p}")
-        return pd.read_csv(p)
-    if _default_tw_df is None:
-        raise ValueError("No type_well_csv provided and no default configured in config.yaml")
-    return _default_tw_df
-
-
-def _well_id_from_path(csv_path, override=None):
+def _well_id_from_filename(filename, override=None):
     if override:
         return override
-    stem = Path(csv_path).stem
+    stem = Path(filename or "well").stem
     return stem.replace("__horizontal_well", "")
 
 
-def _run_single(csv_path, well_id=None, type_well_csv=None) -> dict:
-    p = Path(csv_path)
-    if not p.exists():
-        raise FileNotFoundError(f"csv_path not found: {p}")
-
-    hw = pd.read_csv(p)
-    tw = _load_type_well(type_well_csv)
-    wid = _well_id_from_path(p, well_id)
-
+def _run_single_df(hw: pd.DataFrame, tw: pd.DataFrame, wid: str) -> dict:
     feat_df = build_well(hw, tw, predictor.FI, predictor.DI, wid=wid, is_train=False)
     if feat_df is None or feat_df.empty:
         raise ValueError(
@@ -195,6 +170,24 @@ def _run_single(csv_path, well_id=None, type_well_csv=None) -> dict:
     return {"well": wid, "n_points": len(predictions), "predictions": predictions}
 
 
+async def _read_csv_upload(upload: UploadFile) -> pd.DataFrame:
+    raw = await upload.read()
+    try:
+        return pd.read_csv(io.BytesIO(raw))
+    except Exception as e:
+        raise ValueError(f"Could not parse '{upload.filename}' as CSV: {e}")
+
+
+async def _resolve_type_well(type_well_file: Optional[UploadFile]) -> pd.DataFrame:
+    if type_well_file is not None:
+        return await _read_csv_upload(type_well_file)
+    if _default_tw_df is None:
+        raise ValueError(
+            "No type_well_file uploaded and no default type_well_csv configured in config.yaml"
+        )
+    return _default_tw_df
+
+
 # --------------------------------------------------------------------------- #
 # Routes
 # --------------------------------------------------------------------------- #
@@ -205,12 +198,19 @@ async def health():
 
 
 @app.post("/predict", response_model=PredictResponse)
-async def predict(req: PredictRequest):
+async def predict(
+    file: UploadFile = File(..., description="Horizontal well CSV to predict on"),
+    well_id: Optional[str] = Form(None),
+    type_well_file: Optional[UploadFile] = File(None, description="Optional type-well reference CSV"),
+):
     try:
-        return await run_in_threadpool(_run_single, req.csv_path, req.well_id, req.type_well_csv)
-    except FileNotFoundError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        hw = await _read_csv_upload(file)
+        tw = await _resolve_type_well(type_well_file)
+        wid = _well_id_from_filename(file.filename, well_id)
+
+        return await run_in_threadpool(_run_single_df, hw, tw, wid)
     except ValueError as e:
+        log.exception("ValueError in /predict")
         raise HTTPException(status_code=422, detail=str(e))
     except Exception as e:
         log.exception("Unexpected error in /predict")
@@ -218,14 +218,26 @@ async def predict(req: PredictRequest):
 
 
 @app.post("/predict_batch", response_model=PredictBatchResponse)
-async def predict_batch(req: PredictBatchRequest):
+async def predict_batch(
+    files: List[UploadFile] = File(..., description="One or more horizontal well CSVs"),
+    type_well_file: Optional[UploadFile] = File(None, description="Optional type-well reference CSV, shared across all wells"),
+):
     results, errors = [], []
-    for csv_path in req.csv_paths:
+
+    try:
+        tw = await _resolve_type_well(type_well_file)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    for f in files:
         try:
-            result = await run_in_threadpool(_run_single, csv_path, None, req.type_well_csv)
+            hw = await _read_csv_upload(f)
+            wid = _well_id_from_filename(f.filename)
+            result = await run_in_threadpool(_run_single_df, hw, tw, wid)
             results.append(result)
         except Exception as e:
-            errors.append({"csv_path": csv_path, "error": str(e)})
+            errors.append({"filename": f.filename, "error": str(e)})
+
     return {"results": results, "errors": errors}
 
 

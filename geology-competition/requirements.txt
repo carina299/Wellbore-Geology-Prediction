@@ -10,3 +10,5 @@ joblib
 numba
 fastapi
 uvicorn
+pyyaml
+python-multipart

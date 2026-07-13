@@ -723,7 +723,7 @@ def build_well(hw, tw, spatial_knn, dense_imputer, wid="unknown_well", is_train=
     swid = None
     xy_ev = ev[['X', 'Y']].to_numpy(np.float64); xy_kn = kn[['X', 'Y']].to_numpy(np.float64)
     form_ev, knn_d = spatial_knn.impute(xy_ev, self_wid=swid)
-    form_kn, _ = dense_imputer.impute(xy_kn, self_wid=swid)
+    form_kn, _ = spatial_knn.impute(xy_kn, self_wid=swid)
     z_kn = kn['Z'].to_numpy(np.float32); z_ev = ev['Z'].to_numpy(np.float32)
  
     tvt_fs = {}; form_rmse = {}; form_list = []

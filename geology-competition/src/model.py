@@ -5,6 +5,12 @@ import pandas as pd
 from scipy.signal import savgol_filter
 from pathlib import Path
 
+from src.features import FormationPlaneKNN, DenseANCCImputer
+import __main__
+__main__.FormationPlaneKNN = FormationPlaneKNN
+__main__.DenseANCCImputer = DenseANCCImputer
+
+
 class WellborePredictor:
     def __init__(self, models_dir= None):
 
@@ -33,26 +39,47 @@ class WellborePredictor:
             df.loc[g.index, col_name] = v
         return df
 
+    def _select_features(self, feat_df, feature_names, model_label):
+        missing = [c for c in feature_names if c not in feat_df.columns]
+        if missing:
+            raise ValueError(
+                f"feat_df is missing {len(missing)} feature(s) required by {model_label}: "
+                f"{missing[:10]}{'...' if len(missing) > 10 else ''}"
+            )
+        return feat_df[feature_names]
+
+    def _prepare_model_inputs(self, feat_df):
+        """Build the exact feature matrix each individual model needs (name + order),
+        validated up front, before any inference runs."""
+        lgb_inputs = [
+            [self._select_features(feat_df, m.feature_name(), f"LightGBM seed {i}") for m in folds]
+            for i, folds in enumerate(self.lgb_models, start=1)
+        ]
+        cat_inputs = [
+            [self._select_features(feat_df, m.feature_names_, f"CatBoost seed {i}") for m in folds]
+            for i, folds in enumerate(self.cat_models, start=1)
+        ]
+        return lgb_inputs, cat_inputs
+
     def predict(self, feat_df):
 
         if feat_df is None or feat_df.empty:
             return None
-            
-        features_to_use = [c for c in feat_df.columns if c not in {'well', 'id', 'target'}]
-        X = feat_df[features_to_use]
-  
+
+        lgb_inputs, cat_inputs = self._prepare_model_inputs(feat_df)
+
         all_seed_preds = []
 
-        for folds in self.lgb_models:
-            lgb_seed_pred = np.zeros(len(X), dtype=np.float32)
-            for m in folds:
+        for folds, X_folds in zip(self.lgb_models, lgb_inputs):
+            lgb_seed_pred = np.zeros(len(feat_df), dtype=np.float32)
+            for m, X in zip(folds, X_folds):
                 best_iter = getattr(m, 'best_iteration', None)
                 lgb_seed_pred += m.predict(X, num_iteration=best_iter).astype(np.float32) / len(folds)
             all_seed_preds.append(lgb_seed_pred)
 
-        for folds in self.cat_models:
-            cb_seed_pred = np.zeros(len(X), dtype=np.float32)
-            for m in folds:
+        for folds, X_folds in zip(self.cat_models, cat_inputs):
+            cb_seed_pred = np.zeros(len(feat_df), dtype=np.float32)
+            for m, X in zip(folds, X_folds):
                 cb_seed_pred += m.predict(X.values).astype(np.float32) / len(folds)
             all_seed_preds.append(cb_seed_pred)
 

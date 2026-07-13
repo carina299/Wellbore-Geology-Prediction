@@ -1,2 +1,14 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.vscode/
+.idea/
 .DS_Store
+.venv/
+venv/
+env/
 data/
+*.csv
+models/
+artifacts/
+geology-competition/LightGBM/
