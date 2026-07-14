@@ -94,7 +94,11 @@ CONFIG = load_config()
 app = FastAPI(title="Wellbore TVT Predictor", version="2.0.0")
 
 log.info("Loading WellborePredictor (models_dir=%s)...", CONFIG.get("models_dir"))
-predictor = WellborePredictor(models_dir=CONFIG.get("models_dir"))
+predictor = WellborePredictor(
+    models_dir=CONFIG.get("models_dir"),
+    s3_bucket=CONFIG.get("models_s3_bucket"),
+    s3_key=CONFIG.get("models_s3_key"),
+)
 log.info("Predictor loaded: %d LightGBM seeds, %d CatBoost seeds",
           len(predictor.lgb_models), len(predictor.cat_models))
 

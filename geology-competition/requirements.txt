@@ -12,3 +12,4 @@ fastapi
 uvicorn
 pyyaml
 python-multipart
+boto3

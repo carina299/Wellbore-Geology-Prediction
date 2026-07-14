@@ -1,0 +1,32 @@
+# --- Version control ---
+.git
+.gitignore
+
+# --- Python environments ---
+venv/
+.venv/
+env/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# --- IDE / editor ---
+.idea/
+.vscode/
+
+# --- Model artifacts (now fetched from S3 at container startup, no need to bake in) ---
+src/models/*.pkl
+models/*.pkl
+
+# --- Large local-only data / notebooks / experiment stuff, not needed at runtime ---
+data/
+LightGBM/
+notebooks/
+*.ipynb
+*.csv
+
+# --- Misc ---
+*.log
+.DS_Store
+.env
