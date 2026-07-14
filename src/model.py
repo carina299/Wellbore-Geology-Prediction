@@ -50,13 +50,22 @@ class WellborePredictor:
 
     def _prepare_model_inputs(self, feat_df):
         """Build the exact feature matrix each individual model needs (name + order),
-        validated up front, before any inference runs."""
+        validated up front, before any inference runs.
+
+        CatBoost's models only have generic feature names ('0', '1', ...)
+        because they were trained on a plain numpy array (no column names attached).
+        Since this stacking pipeline trains LightGBM and CatBoost on the same
+        underlying feature matrix, we reuse LightGBM's real feature name/order as
+        the reference for CatBoost too, instead of CatBoost's own placeholder names.
+        """
+        reference_features = self.lgb_models[0][0].feature_name()
+        
         lgb_inputs = [
             [self._select_features(feat_df, m.feature_name(), f"LightGBM seed {i}") for m in folds]
             for i, folds in enumerate(self.lgb_models, start=1)
         ]
         cat_inputs = [
-            [self._select_features(feat_df, m.feature_names_, f"CatBoost seed {i}") for m in folds]
+            [self._select_features(feat_df, reference_features, f"CatBoost seed {i}") for m in folds]
             for i, folds in enumerate(self.cat_models, start=1)
         ]
         return lgb_inputs, cat_inputs
