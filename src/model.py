@@ -17,18 +17,38 @@ __main__.DenseANCCImputer = DenseANCCImputer
 
 log = logging.getLogger(__name__)
 
-# The exact set of model artifacts WellborePredictor needs to run.
-REQUIRED_MODEL_FILES = [
-    "lightgbm-1.pkl", "lightgbm-2.pkl", "lightgbm-3.pkl",
-    "catboost-1.pkl", "catboost-2.pkl", "catboost-3.pkl",
-    "FI_knn.pkl", "DI_imputer.pkl",
-]
+# --------------------------------------------------------------------------- #
+# Model profiles
+# --------------------------------------------------------------------------- #
+# "full"  -- the real 3-seed x 5-fold LightGBM/CatBoost ensemble (large pkls).
+# "demo"  -- a lightweight 1-seed version for cheap/free hosting (e.g. Render's
+#            free tier), so a portfolio/demo link doesn't need paid disk/RAM.
+#
+# Switch between them via config.yaml (`model_profile: demo`) or the
+# MODEL_PROFILE env var -- no code changes needed. Each profile can also point
+# at a different S3 zip, and is cached in its own local subfolder
+# (models/<profile>/) so full and demo artifacts never collide on disk.
+DEFAULT_MODEL_PROFILES = {
+    "full": {
+        "lgb_files": ["lightgbm-1.pkl", "lightgbm-2.pkl", "lightgbm-3.pkl"],
+        "cat_files": ["catboost-1.pkl", "catboost-2.pkl", "catboost-3.pkl"],
+        "fi_file": "FI_knn.pkl",
+        "di_file": "DI_imputer.pkl",
+        "s3_key": "models.zip",
+    },
+    "demo": {
+        "lgb_files": ["lightgbm-1.pkl"],
+        "cat_files": ["catboost-1.pkl"],
+        "fi_file": "FI_knn.pkl",
+        "di_file": "DI_imputer.pkl",
+        "s3_key": "models_demo.zip",
+    },
+}
 
 # Defaults match the standalone download_models.py script; override via env vars
-# (MODELS_S3_BUCKET / MODELS_S3_KEY) or the WellborePredictor(...) constructor args
-# without having to touch code.
+# (MODELS_S3_BUCKET / MODEL_PROFILE) or the WellborePredictor(...) constructor
+# args without having to touch code.
 DEFAULT_S3_BUCKET = "wellbore-geology-models"
-DEFAULT_S3_KEY = "models.zip"
 
 
 def _download_models_from_s3(models_dir: Path, bucket: str, key: str):
@@ -69,35 +89,51 @@ def _download_models_from_s3(models_dir: Path, bucket: str, key: str):
 
 
 class WellborePredictor:
-    def __init__(self, models_dir=None, s3_bucket=None, s3_key=None, auto_download=True):
+    def __init__(self, models_dir=None, profile=None, profiles=None,
+                 s3_bucket=None, s3_key=None, auto_download=True):
+
+        self.profile = profile or os.environ.get("MODEL_PROFILE", "full")
+        profiles = {**DEFAULT_MODEL_PROFILES, **(profiles or {})}
+        if self.profile not in profiles:
+            raise ValueError(
+                f"Unknown model_profile '{self.profile}'. Available: {sorted(profiles)}"
+            )
+        spec = profiles[self.profile]
+        required_files = [*spec["lgb_files"], *spec["cat_files"], spec["fi_file"], spec["di_file"]]
 
         if models_dir is None:
             current_dir = Path(__file__).resolve().parent
-            self.models_dir = current_dir / "models"
+            # Nested under the profile name so "full" and "demo" artifacts never
+            # collide on disk, even if they happen to share filenames.
+            self.models_dir = current_dir / "models" / self.profile
         else:
             self.models_dir = Path(models_dir)
 
-        missing = [f for f in REQUIRED_MODEL_FILES if not (self.models_dir / f).exists()]
+        missing = [f for f in required_files if not (self.models_dir / f).exists()]
         if missing:
             if not auto_download:
                 raise FileNotFoundError(
                     f"Missing model file(s) {missing} in {self.models_dir} and auto_download=False."
                 )
             bucket = s3_bucket or os.environ.get("MODELS_S3_BUCKET", DEFAULT_S3_BUCKET)
-            key = s3_key or os.environ.get("MODELS_S3_KEY", DEFAULT_S3_KEY)
-            log.warning("Missing model file(s) %s in %s -- attempting S3 download.", missing, self.models_dir)
+            key = s3_key or spec["s3_key"]
+            log.warning(
+                "[profile=%s] Missing model file(s) %s in %s -- attempting S3 download.",
+                self.profile, missing, self.models_dir,
+            )
             _download_models_from_s3(self.models_dir, bucket, key)
 
-            still_missing = [f for f in REQUIRED_MODEL_FILES if not (self.models_dir / f).exists()]
+            still_missing = [f for f in required_files if not (self.models_dir / f).exists()]
             if still_missing:
                 raise FileNotFoundError(
                     f"Still missing model file(s) {still_missing} in {self.models_dir} after S3 download."
                 )
 
-        self.lgb_models = [joblib.load(self.models_dir / f"lightgbm-{i}.pkl") for i in range(1, 4)]
-        self.cat_models = [joblib.load(self.models_dir / f"catboost-{i}.pkl") for i in range(1, 4)]
-        self.FI = joblib.load(self.models_dir / "FI_knn.pkl")
-        self.DI = joblib.load(self.models_dir / "DI_imputer.pkl")
+        log.info("Loading model profile '%s' from %s", self.profile, self.models_dir)
+        self.lgb_models = [joblib.load(self.models_dir / f) for f in spec["lgb_files"]]
+        self.cat_models = [joblib.load(self.models_dir / f) for f in spec["cat_files"]]
+        self.FI = joblib.load(self.models_dir / spec["fi_file"])
+        self.DI = joblib.load(self.models_dir / spec["di_file"])
 
     def sg_smooth(self, df, col_name='pred', sg_w=17, sg_p=3):
   
