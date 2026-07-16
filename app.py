@@ -93,14 +93,16 @@ CONFIG = load_config()
 
 app = FastAPI(title="Wellbore TVT Predictor", version="2.0.0")
 
-log.info("Loading WellborePredictor (models_dir=%s)...", CONFIG.get("models_dir"))
+log.info("Loading WellborePredictor (profile=%s, models_dir=%s)...",
+          CONFIG.get("model_profile", "full (default)"), CONFIG.get("models_dir"))
 predictor = WellborePredictor(
     models_dir=CONFIG.get("models_dir"),
+    profile=CONFIG.get("model_profile"),
+    profiles=CONFIG.get("model_profiles"),
     s3_bucket=CONFIG.get("models_s3_bucket"),
-    s3_key=CONFIG.get("models_s3_key"),
 )
-log.info("Predictor loaded: %d LightGBM seeds, %d CatBoost seeds",
-          len(predictor.lgb_models), len(predictor.cat_models))
+log.info("Predictor loaded profile '%s': %d LightGBM seeds, %d CatBoost seeds",
+          predictor.profile, len(predictor.lgb_models), len(predictor.cat_models))
 
 _default_tw_path = CONFIG.get("type_well_csv")
 _default_tw_df = None
@@ -198,7 +200,12 @@ async def _resolve_type_well(type_well_file: Optional[UploadFile]) -> pd.DataFra
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    return {
+        "status": "ok",
+        "model_profile": predictor.profile,
+        "lgb_seeds": len(predictor.lgb_models),
+        "cat_seeds": len(predictor.cat_models),
+    }
 
 
 @app.post("/predict", response_model=PredictResponse)
