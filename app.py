@@ -198,6 +198,14 @@ async def _resolve_type_well(type_well_file: Optional[UploadFile]) -> pd.DataFra
 # Routes
 # --------------------------------------------------------------------------- #
 
+@app.get("/")
+async def root():
+    return {
+        "service": "wellbore geology prediction API",
+        "status": "running"
+    }
+
+
 @app.get("/health")
 async def health():
     return {
