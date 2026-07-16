@@ -10,7 +10,7 @@ model_profiles:
     di_file: DI_imputer.pkl
     s3_key: models.zip
   demo:
-    lgb_files: [lightgbm-2.pkl]
+    lgb_files: []
     cat_files: [catboost-1.pkl]
     fi_file: FI_knn.pkl
     di_file: DI_imputer.pkl
