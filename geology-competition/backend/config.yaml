@@ -1,4 +1,4 @@
-model_profile: demo
+# model_profile: full
 
 models_s3_bucket: wellbore-geology-models
 
