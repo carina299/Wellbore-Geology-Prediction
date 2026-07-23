@@ -3,21 +3,6 @@ FastAPI REST API for the wellbore TVT predictor.
 
 Endpoints
 ---------
-GET  /health
-    Liveness check.
-
-POST /predict   (multipart/form-data)
-    file:            the horizontal well CSV to predict on (required)
-    well_id:         optional override, else derived from the uploaded filename
-    type_well_file:  optional type-well reference CSV (TVT, GR columns);
-                      if omitted, falls back to config.yaml's type_well_csv
-    -> { "well": ..., "n_points": ..., "predictions": [ {id, md, pred}, ... ] }
-
-POST /predict_batch   (multipart/form-data)
-    files:           one or more horizontal well CSVs (required, repeat the field)
-    type_well_file:  optional type-well reference CSV, shared across all wells
-    -> { "results": [ <same shape as /predict per well>, ... ], "errors": [...] }
-
 Run with:  uvicorn app:app --host 0.0.0.0 --port 8000
 (host/port/reload can also be read from config.yaml if you run this file directly)
 
@@ -49,6 +34,7 @@ from typing import List, Optional
 import pandas as pd
 import yaml
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel
 
@@ -93,6 +79,13 @@ CONFIG = load_config()
 
 app = FastAPI(title="Wellbore TVT Predictor", version="2.0.0")
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=CONFIG.get("cors_origins", ["*"]),
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 log.info("Loading WellborePredictor (profile=%s, models_dir=%s)...",
           CONFIG.get("model_profile", "full (default)"), CONFIG.get("models_dir"))
 predictor = WellborePredictor(
@@ -115,7 +108,7 @@ if _default_tw_path:
         log.warning("configured type_well_csv %s does not exist", _default_tw_path)
 
 
-# --------------------------------------------------------------------------- #
+# ------------------------------------------------------------------------- #
 # Response schemas
 # --------------------------------------------------------------------------- #
 
